@@ -46,7 +46,14 @@
   #objective { font-size: 13px; letter-spacing: 0.04em; color: #ffe9c9; text-shadow: 0 1px 4px rgba(0,0,0,0.8); margin-top: 2px; white-space: nowrap; }
   #combo { position: absolute; left: 50%; top: 15%; transform: translateX(-50%); font-size: 28px; font-weight: 800; letter-spacing: 0.08em; color: #ffb020; text-shadow: 0 0 16px rgba(255, 176, 32, 0.9), 0 2px 6px rgba(0,0,0,0.6); display: none; white-space: nowrap; }
 
-  #btn-drop { position: absolute; right: 14px; bottom: 60px; pointer-events: auto; display: none; background: linear-gradient(180deg, #ff9a3c, #e07a1f); color: #241208; border: none; border-radius: 10px; padding: 11px 18px; font-size: 14px; font-weight: 800; letter-spacing: 0.08em; cursor: pointer; box-shadow: 0 4px 18px rgba(255, 140, 40, 0.45); }
+  #btn-drop { position: absolute; right: 14px; bottom: 110px; pointer-events: auto; display: none; background: linear-gradient(180deg, #ff9a3c, #e07a1f); color: #241208; border: none; border-radius: 10px; padding: 11px 18px; font-size: 14px; font-weight: 800; letter-spacing: 0.08em; cursor: pointer; box-shadow: 0 4px 18px rgba(255, 140, 40, 0.45); }
+
+  #btn-cockpit { position: absolute; right: 14px; bottom: 60px; pointer-events: auto; background: rgba(20,14,28,0.6); color: #ffe9c9; border: 1px solid rgba(255,190,110,0.5); border-radius: 8px; padding: 9px 14px; font-size: 12px; font-weight: 700; letter-spacing: 0.1em; cursor: pointer; }
+
+  /* --- cockpit instruments: live canvas gauges on the dashboard --- */
+  #cockpit-panel { position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); display: none; gap: 12px; align-items: flex-end; z-index: 6; pointer-events: none; }
+  #cockpit-panel .gauge { text-align: center; filter: drop-shadow(0 2px 6px rgba(0,0,0,0.6)); }
+  #cockpit-panel .gcap { font-size: 9px; letter-spacing: 0.16em; color: #ffb36b; margin-top: 2px; text-shadow: 0 1px 3px rgba(0,0,0,0.9); }
 
   #crosshair { position: absolute; left: 50%; top: 50%; width: 34px; height: 34px; transform: translate(-50%, -50%); opacity: 0.85; }
   #crosshair::before, #crosshair::after { content: ""; position: absolute; background: #ffe9c9; box-shadow: 0 0 6px rgba(255, 190, 90, 0.8); }
@@ -123,7 +130,17 @@
   <div id="ringind"><div class="ring-arrow">➤</div><div id="ringdist"></div></div>
   <div id="message"></div>
   <div id="hint"></div>
+  <div id="cockpit-panel">
+    <div class="gauge"><canvas id="g-att" width="110" height="110"></canvas><div class="gcap">ATTITUDE</div></div>
+    <div class="gauge"><canvas id="g-alt" width="96" height="96"></canvas><div class="gcap">ALT FT</div></div>
+    <div class="gauge"><canvas id="g-spd" width="96" height="96"></canvas><div class="gcap">AIRSPEED KT</div></div>
+    <div class="gauge"><canvas id="g-compass" width="200" height="44"></canvas><div class="gcap">HEADING</div></div>
+    <div class="gauge"><canvas id="g-fuel" width="96" height="96"></canvas><div class="gcap">FUEL</div></div>
+    <div class="gauge"><canvas id="g-dmg" width="96" height="96"></canvas><div class="gcap">DAMAGE</div></div>
+    <div class="gauge"><canvas id="g-thr" width="44" height="96"></canvas><div class="gcap">THROTTLE</div></div>
+  </div>
   <button id="btn-drop" type="button">DROP CRATE (C)</button>
+  <button id="btn-cockpit" type="button">COCKPIT (V)</button>
   <button id="btn-mute" type="button">SOUND: ON</button>
 </div>
 
@@ -135,17 +152,18 @@
       <button id="btn-mission-ring" class="mission-btn selected" type="button">① RING RUN<span>8 gold rings, in order · par 5:00</span></button>
       <button id="btn-mission-cargo" class="mission-btn" type="button">② CARGO DROP<span>Drop the crate on the target · par 4:00</span></button>
       <button id="btn-mission-rescue" class="mission-btn" type="button">③ MOUNTAIN RESCUE<span>Pick up the hiker on the ridge · par 6:00</span></button>
+      <button id="btn-mission-tour" class="mission-btn" type="button">④ FLY THE TOUR<span>Ring, cargo, rescue in one sortie · par 15:00</span></button>
     </div>
     <div class="controls">
       <b>W / ↑</b> — climb &nbsp;·&nbsp; <b>S / ↓</b> — descend<br>
       <b>A / ←</b> — bank left &nbsp;·&nbsp; <b>D / →</b> — bank right<br>
       <b>Shift</b> — throttle up &nbsp;·&nbsp; <b>Ctrl</b> — throttle down<br>
-      <b>C</b> — drop the cargo crate &nbsp;·&nbsp; <b>1 / 2 / 3</b> — pick a mission<br>
-      <b>Mouse drag</b> — look around &nbsp;·&nbsp; <b>Wheel</b> — trim throttle<br>
-      <b>Enter</b> — take off &nbsp;·&nbsp; <b>M</b> — sound on/off &nbsp;·&nbsp; <b>R</b> — restart
+      <b>C</b> — drop the cargo crate &nbsp;·&nbsp; <b>V</b> — cockpit view<br>
+      <b>1 / 2 / 3 / 4</b> — pick a mission &nbsp;·&nbsp; <b>Mouse drag</b> — look around<br>
+      <b>Wheel</b> — trim throttle &nbsp;·&nbsp; <b>Enter</b> — take off &nbsp;·&nbsp; <b>M</b> — sound on/off &nbsp;·&nbsp; <b>R</b> — restart
     </div>
     <button id="btn-start" class="btn" type="button">TAKE OFF ▸</button>
-    <p class="fine">Land gently and slowly on the runway — hard, fast, or off the strip damages the airframe. Fuel runs out: land on the runway or fly a teal fuel ring to top up. Each ring is +100 (combos multiply), a good cargo drop is up to +500, a rescue is +600 — and finishing inside par earns a time bonus.</p>
+    <p class="fine">Land gently and slowly on the runway — hard, fast, or off the strip damages the airframe, and a centred, gentle touchdown pays up to +200. Fuel runs out: land on the runway or fly a teal fuel ring to top up. Each ring is +100 (combos multiply), a good cargo drop is up to +500, a rescue is +600 — and finishing inside par earns a time bonus. Fly the Tour chains all three missions in one sortie, with fuel and damage carrying over.</p>
   </div>
 </div>
 
@@ -156,10 +174,24 @@
     <div class="stats">
       Time: <b id="final-time">00:00</b> &nbsp;·&nbsp; <span id="final-rings">8 / 8 rings</span><br>
       Score: <b id="final-score">0</b> &nbsp;·&nbsp; <span id="final-bonus">+0 time bonus</span><br>
+      <span id="final-landing">LANDING: —</span><br>
       <span class="big">TOTAL: <span id="final-total">0</span></span>
     </div>
     <button id="btn-again" class="btn" type="button">FLY AGAIN ▸</button>
     <p class="fine">Press Enter or R to fly again.</p>
+  </div>
+</div>
+
+<div id="overlay-turnaround" class="overlay hidden">
+  <div class="card">
+    <h2 id="turn-title">LEG 1 COMPLETE ✈</h2>
+    <p class="sub" id="turn-sub">The Courier is on the runway — the tank is refilling and the ground crew is mending the airframe.</p>
+    <div class="stats">
+      <span id="turn-score">LEG 1 · RING RUN — 0 points</span><br>
+      <span class="big" id="turn-next">NEXT LEG: CARGO DROP</span>
+    </div>
+    <button id="btn-turn" class="btn" type="button">NEXT LEG ▸</button>
+    <p class="fine">Press Enter to continue, or wait a few seconds.</p>
   </div>
 </div>
 

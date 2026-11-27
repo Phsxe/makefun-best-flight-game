@@ -193,4 +193,71 @@ export class Sound {
       o.stop(start + 0.65);
     });
   }
+
+  // A short low-fuel warning beep. Call it at most once every few seconds.
+  fuelWarning() {
+    if (!this.ctx || this.muted || this.ctx.state !== 'running') return;
+    const ctx = this.ctx;
+    const t = ctx.currentTime;
+    [660, 660].forEach((freq, i) => {
+      const o = ctx.createOscillator();
+      o.type = 'square';
+      o.frequency.value = freq;
+      const g = ctx.createGain();
+      const start = t + i * 0.16;
+      g.gain.setValueAtTime(0.0001, start);
+      g.gain.exponentialRampToValueAtTime(0.07, start + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, start + 0.12);
+      o.connect(g);
+      g.connect(ctx.destination);
+      o.start(start);
+      o.stop(start + 0.14);
+    });
+  }
+
+  // The cargo going away: a short whoosh as the crate drops.
+  drop() {
+    if (!this.ctx || this.muted || this.ctx.state !== 'running') return;
+    const ctx = this.ctx;
+    const t = ctx.currentTime;
+    const len = ctx.sampleRate * 0.3;
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const f = ctx.createBiquadFilter();
+    f.type = 'bandpass';
+    f.frequency.setValueAtTime(1400, t);
+    f.frequency.exponentialRampToValueAtTime(300, t + 0.3);
+    f.Q.value = 1.2;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.25, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.3);
+    src.connect(f);
+    f.connect(g);
+    g.connect(ctx.destination);
+    src.start(t);
+  }
+
+  // A warm two-note chime when the hiker is picked up.
+  pickup() {
+    if (!this.ctx || this.muted || this.ctx.state !== 'running') return;
+    const ctx = this.ctx;
+    const t = ctx.currentTime;
+    [659.25, 987.77].forEach((freq, i) => {
+      const o = ctx.createOscillator();
+      o.type = 'triangle';
+      o.frequency.value = freq;
+      const g = ctx.createGain();
+      const start = t + i * 0.11;
+      g.gain.setValueAtTime(0.0001, start);
+      g.gain.exponentialRampToValueAtTime(0.2, start + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, start + 0.55);
+      o.connect(g);
+      g.connect(ctx.destination);
+      o.start(start);
+      o.stop(start + 0.6);
+    });
+  }
 }

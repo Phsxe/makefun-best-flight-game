@@ -21,6 +21,11 @@ export const RUNWAY = {
 export const RIVER_X = 70; // the river runs the length of the valley
 export const LAKE = { x: -40, z: -640, rx: 130, rz: 90 };
 
+// The rescue helipad: a flat patch on the high west ridge where the hiker
+// waits. The terrain function flattens toward the pad's own height, so the
+// mesh and the physics agree and the pad is landable.
+export const HELIPAD = { x: -300, z: -550, r: 24 };
+
 const WORLD = 2000; // terrain spans x,z in [-1000, 1000]
 
 // --- the height function ---------------------------------------------------
@@ -28,8 +33,8 @@ const WORLD = 2000; // terrain spans x,z in [-1000, 1000]
 const fbm = makeFbm(1337);
 const fbmFloor = makeFbm(777);
 
-// Height of the ground at (x, z), in metres. 0 is the valley floor.
-export function terrainHeight(x, z) {
+// The ground before the runway and helipad flattening is applied.
+function baseHeight(x, z) {
   const ax = Math.abs(x);
   // The valley walls: flat floor, then mountains rising past |x| ~ 180.
   const wall = smoothstep(180, 520, ax) * 175;
@@ -43,12 +48,25 @@ export function terrainHeight(x, z) {
   const lx = (x - LAKE.x) / LAKE.rx;
   const lz = (z - LAKE.z) / LAKE.rz;
   const lake = -6 * Math.exp(-(lx * lx + lz * lz));
-  let h = wall + rough + floor + river + lake;
+  return wall + rough + floor + river + lake;
+}
+
+// The helipad's own height: the natural ground at its centre, so the pad
+// sits on the ridge instead of floating above it or sinking into it.
+const HELIPAD_H = baseHeight(HELIPAD.x, HELIPAD.z);
+
+// Height of the ground at (x, z), in metres. 0 is the valley floor.
+export function terrainHeight(x, z) {
+  const ax = Math.abs(x);
+  let h = baseHeight(x, z);
   // Flatten a strip around the runway so the strip is dead level.
   const rx = 1 - smoothstep(22, 65, ax);
   const rz = 1 - smoothstep(230, 300, Math.abs(z - RUNWAY.z));
   const mask = rx * rz;
   h = h * (1 - mask);
+  // Flatten the helipad toward its own height so a rescue landing is flat.
+  const hp = 1 - smoothstep(8, HELIPAD.r, Math.hypot(x - HELIPAD.x, z - HELIPAD.z));
+  h = h * (1 - hp) + HELIPAD_H * hp;
   return h;
 }
 

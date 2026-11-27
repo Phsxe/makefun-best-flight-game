@@ -1,21 +1,29 @@
-// Dawn Courier — the game itself.
+// Dawn Courier — the game itself, v2.
 // Wires the world, the plane, the flight model, the rings, the HUD and the
-// sound into one loop. States: menu (on the runway, title up), flying (the
-// run), complete (landed after the last ring), crashed. The chase camera
-// follows behind and above the plane and never rolls with it, so it never
-// fights the pilot. ?shot=start|play|end sets up a fixed scene instead.
+// sound into one loop, plus the v2 systems: fuel, damage, three missions,
+// weather, cargo, landmarks and effects. States: menu (on the runway, title
+// up), flying (the run), complete (landed after the mission), crashed. The
+// chase camera follows behind and above the plane and never rolls with it,
+// so it never fights the pilot. ?shot=start|play|end sets up a fixed scene.
 
 import * as THREE from 'three';
-import { World, RUNWAY } from './world.js';
+import { World, RUNWAY, HELIPAD, isOnRunway, terrainHeight } from './world.js';
 import { Plane } from './plane.js';
 import { Rings } from './rings.js';
 import { Flight } from './flight.js';
 import { Hud } from './hud.js';
 import { Sound } from './audio.js';
 import { Input } from './input.js';
+import { Fuel } from './fuel.js';
+import { Damage, impactDamage } from './damage.js';
+import { Missions, MISSION_ORDER } from './missions.js';
+import { Landmarks } from './landmarks.js';
+import { Weather } from './weather.js';
+import { Cargo } from './cargo.js';
+import { Effects } from './effects.js';
 import { readShotParams, applyShot } from './shots.js';
 
-const PAR_TIME = 300; // seconds: finishing inside par earns a time bonus
+const COMBO_WINDOW = 20; // seconds between rings to keep the streak alive
 
 export class Game {
   constructor() {
@@ -27,6 +35,14 @@ export class Game {
     this.frozen = false; // screenshots (?shot=) hold the scene still
     this.lookYaw = 0;
     this.lookPitch = 0;
+    this.selectedMission = 'ring';
+    this.combo = 1;
+    this.lastRingTime = -999;
+    this.fuelWarnAt = -999;
+    this.dropQueued = false;
+    this.landBounceT = 0;
+    this.smokeAcc = 0;
+    this.scrapeAcc = 0;
     this._camPos = new THREE.Vector3(0, 8, 395);
     this._camTarget = new THREE.Vector3(0, 2, 360);
     this._tmp = new THREE.Vector3();
@@ -45,10 +61,17 @@ export class Game {
 
     const { seed } = readShotParams();
     this.world = new World(this.scene, seed);
+    this.landmarks = new Landmarks(this.scene, seed);
     this.plane = new Plane();
     this.scene.add(this.plane.group);
     this.rings = new Rings(this.scene);
+    this.fuel = new Fuel(this.scene);
+    this.cargo = new Cargo(this.scene);
     this.flight = new Flight();
+    this.damage = new Damage();
+    this.missions = new Missions();
+    this.weather = new Weather();
+    this.effects = new Effects(this.scene);
     this.hud = new Hud(this.camera);
     this.sound = new Sound();
     this.input = new Input();
@@ -62,12 +85,25 @@ export class Game {
 
   _wireOverlays() {
     const $ = (id) => document.getElementById(id);
-    const start = () => this.startRun();
+    const start = (missionId) => this.startRun(missionId);
     const again = () => this.restart();
-    if ($('btn-start')) $('btn-start').addEventListener('click', () => { this.sound.ensure(); start(); });
+    if ($('btn-start')) $('btn-start').addEventListener('click', () => { this.sound.ensure(); start(this.selectedMission); });
+    for (const id of MISSION_ORDER) {
+      const b = $(`btn-mission-${id}`);
+      if (b) b.addEventListener('click', () => { this.sound.ensure(); this.selectMission(id); start(id); });
+    }
     if ($('btn-again')) $('btn-again').addEventListener('click', () => { this.sound.ensure(); again(); });
     if ($('btn-crash')) $('btn-crash').addEventListener('click', () => { this.sound.ensure(); again(); });
     if ($('btn-mute')) $('btn-mute').addEventListener('click', () => this.toggleMute());
+    if ($('btn-drop')) $('btn-drop').addEventListener('click', () => { this.dropQueued = true; });
+  }
+
+  selectMission(id) {
+    this.selectedMission = id;
+    for (const m of MISSION_ORDER) {
+      const b = document.getElementById(`btn-mission-${m}`);
+      if (b) b.classList.toggle('selected', m === id);
+    }
   }
 
   showOverlay(id) {
@@ -90,43 +126,78 @@ export class Game {
 
   // --- run control ---------------------------------------------------------
 
-  startRun() {
+  startRun(missionId = this.selectedMission) {
     this.sound.ensure();
+    this.missions.select(missionId);
+    this.selectedMission = missionId;
     this.flight.reset();
     this.rings.reset();
+    this.fuel.reset();
+    this.damage.reset();
+    this.cargo.reset();
+    this.weather.reset();
+    this.effects.clear();
     this.score = 0;
     this.elapsed = 0;
     this.timeBonus = 0;
     this.hasTakenOff = false;
+    this.combo = 1;
+    this.lastRingTime = -999;
+    this.fuelWarnAt = -999;
+    this.dropQueued = false;
+    this.landBounceT = 0;
     this.flight.throttle = 0.55;
     this.state = 'flying';
     this.hideOverlays();
-    this.hud.message('DAWN COURIER — FLY THE GOLD RINGS, THEN LAND', 3);
-    this.hud.hint('HOLD SHIFT FOR THROTTLE · PULL UP (W) TO TAKE OFF');
+    // Mission-specific setup: only the ring mission shows the gold rings;
+    // cargo arms its crate and zone; rescue lights the beacon.
+    const ringsVisible = missionId === 'ring';
+    for (const it of this.rings.items) it.group.visible = ringsVisible;
+    if (missionId === 'cargo') this.cargo.arm();
+    this.landmarks.setRescueBeaconVisible(missionId === 'rescue');
+    const def = this.missions.def;
+    this.hud.message(def.name, 2);
+    this.hud.hint(this.missions.objectiveText());
     this.positionCamera(true);
   }
 
   restart() {
-    this.startRun();
+    this.startRun(this.missions.current);
   }
 
-  showComplete(elapsed, score, bonus) {
+  showComplete(detail) {
+    // detail: { title, sub, timeLine, detailLine, score, bonus }
     this.state = 'complete';
-    const total = score + bonus;
     const set = (id, text) => {
       const el = document.getElementById(id);
       if (el) el.textContent = text;
     };
-    set('final-time', this._fmtTime(elapsed));
-    set('final-rings', `8 / 8 rings`);
-    set('final-score', `${score}`);
-    set('final-bonus', `+${bonus} time bonus`);
-    set('final-total', `${total}`);
+    set('final-title', detail.title);
+    set('final-sub', detail.sub);
+    set('final-time', this._fmtTime(detail.time));
+    set('final-rings', detail.detailLine);
+    set('final-score', `${detail.score}`);
+    set('final-bonus', `+${detail.bonus} time bonus`);
+    set('final-total', `${detail.score + detail.bonus}`);
     this.showOverlay('overlay-complete');
   }
 
-  showCrashed() {
+  showCrashed(reason = 'impact') {
     this.state = 'crashed';
+    const set = (id, text) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = text;
+    };
+    if (reason === 'fuel') {
+      set('crash-title', 'OUT OF FUEL');
+      set('crash-sub', 'The tank ran dry away from the runway and the Courier is stranded. Watch the fuel gauge — the runway refuels, and the teal rings top the tank up.');
+    } else if (reason === 'damage') {
+      set('crash-title', 'AIRFRAME WRECKED');
+      set('crash-sub', 'Too many hard arrivals wore the Courier out. Come in slow, level, and on the strip — the damage meter is the price of every rough landing.');
+    } else {
+      set('crash-title', 'CRASHED');
+      set('crash-sub', 'The Courier came down hard. The dawn valley is unforgiving — come in slow, level, and on the strip.');
+    }
     this.showOverlay('overlay-crash');
   }
 
@@ -186,6 +257,7 @@ export class Game {
     const shotApplied = applyShot(this, shot);
     if (!shotApplied) {
       this.showOverlay('overlay-menu');
+      this.selectMission('ring');
       this.positionCamera(true);
     }
     window.__ready = false;
@@ -212,8 +284,13 @@ export class Game {
     if (input.wasPressed('KeyM')) this.toggleMute();
 
     if (this.state === 'menu') {
-      if (input.wasPressed('Enter') || input.wasPressed('Space')) this.startRun();
+      // Pick a mission with 1/2/3, start the selected one with Enter.
+      if (input.wasPressed('Digit1')) this.selectMission('ring');
+      if (input.wasPressed('Digit2')) this.selectMission('cargo');
+      if (input.wasPressed('Digit3')) this.selectMission('rescue');
+      if (input.wasPressed('Enter') || input.wasPressed('Space')) this.startRun(this.selectedMission);
       this.world.update(dt);
+      this.landmarks.update(dt, this.elapsed);
       this.positionCamera(false);
       this._syncPlaneVisual(dt);
       this._updateHud();
@@ -226,6 +303,8 @@ export class Game {
         this.restart();
       }
       this.world.update(dt);
+      this.landmarks.update(dt, this.elapsed);
+      this.effects.update(dt);
       this._syncPlaneVisual(dt);
       this._updateHud();
       input.endFrame();
@@ -236,6 +315,74 @@ export class Game {
     // Screenshots hold the scene still: no flight, no rings, no clock.
     if (!this.frozen) {
       this.elapsed += dt;
+
+      // Weather: the wind pushes the plane and ruffles the air.
+      this.weather.update(dt);
+      this.flight.wind.copy(this.weather.wind);
+      this.flight.turbulence = this.weather.turbulence;
+
+      // Fuel: it drains with the throttle, refills on the runway, and a dry
+      // tank means engine out — the prop stops and the plane glides.
+      this.fuel.drain(this.flight.throttle, dt, this.flight.grounded);
+      if (this.fuel.empty) {
+        if (!this.flight.engineOut) {
+          this.flight.engineOut = true;
+          this.hud.message('ENGINE OUT — FUEL EMPTY · GLIDE TO THE RUNWAY', 3);
+          this.sound.fuelWarning();
+        }
+      } else if (this.fuel.level > 8) {
+        this.flight.engineOut = false;
+      }
+      if (this.fuel.low && this.elapsed - this.fuelWarnAt > 3) {
+        this.fuelWarnAt = this.elapsed;
+        this.sound.fuelWarning();
+      }
+      if (this.flight.grounded && isOnRunway(this.flight.pos.x, this.flight.pos.z)) {
+        this.fuel.refuelOnRunway(dt);
+      }
+      const fuelRing = this.fuel.checkRing(this.flight.pos);
+      if (fuelRing) {
+        this.sound.chime();
+        this.hud.message('FUEL RING — +50', 1.8);
+      }
+
+      // Cargo: release the crate with C or the DROP button.
+      if (this.missions.current === 'cargo' && this.missions.phase === 'go') {
+        if (input.wasPressed('KeyC') || this.dropQueued) {
+          this.dropQueued = false;
+          if (this.cargo.release(this.flight.pos, this.flight.forward, this.flight.speed)) {
+            this.missions.dropped = true;
+            this.missions.phase = 'dropped';
+            this.sound.drop();
+            this.hud.message('CRATE AWAY — WATCH WHERE IT LANDS', 2.5);
+          }
+        }
+      }
+      this.cargo.update(dt);
+      if (this.missions.current === 'cargo' && this.missions.phase === 'dropped' && this.cargo.landed) {
+        const pts = this.cargo.accuracyScore;
+        this.score += pts;
+        this.missions.phase = 'return';
+        this.sound.chime();
+        this.hud.message(`CRATE DOWN — ${Math.round(this.cargo.landedDist)} m FROM CENTRE · +${pts}`, 3);
+      }
+      if (this.cargo.state === 'loaded') this.cargo.follow(this.flight.pos);
+
+      // Rescue: land on the helipad (or creep in slow and low) to pick up
+      // the hiker, then bring them home.
+      if (this.missions.current === 'rescue' && this.missions.phase === 'go') {
+        const dx = this.flight.pos.x - HELIPAD.x;
+        const dz = this.flight.pos.z - HELIPAD.z;
+        const near = Math.hypot(dx, dz) < 22;
+        if (near && (this.flight.grounded || this.flight.speed < 10)) {
+          this.missions.pickedUp = true;
+          this.missions.phase = 'aboard';
+          this.score += 600; // the rescue itself is worth 600 points
+          this.sound.pickup();
+          this.hud.message('HIKER ABOARD — RETURN TO THE RUNWAY', 3);
+        }
+      }
+
       const axes = {
         pitch: input.pitchAxis(),
         roll: input.rollAxis(),
@@ -245,36 +392,73 @@ export class Game {
 
       if (event === 'takeoff') {
         this.hasTakenOff = true;
-        this.hud.message('AIRBORNE — FLY THE GOLD RING', 2);
+        this.hud.message('AIRBORNE — ' + this.missions.objectiveText(), 2);
         this.sound.thud(0.5);
-      } else if (event === 'landed-runway') {
-        this.sound.thud(1);
-        if (this.rings.done) {
-          this.timeBonus = Math.max(0, Math.round((PAR_TIME - this.elapsed) * 2));
-          this.sound.fanfare();
-          this.showComplete(this.elapsed, this.score, this.timeBonus);
+      } else if (event === 'landed-runway' || event === 'landed-field') {
+        // A touchdown wears the airframe by how hard it was.
+        const impact = this.flight.lastImpact;
+        let dmg = 0;
+        if (impact && impact.severity > 0) {
+          dmg = impactDamage(impact.severity);
+          this.damage.add(dmg, 'landing');
+          this.landBounceT = Math.min(0.5, impact.severity * 0.5);
+        }
+        this.effects.dust(this.flight.pos, impact ? 8 + Math.round(impact.severity * 10) : 8);
+        this.sound.thud(0.6 + (impact ? impact.severity * 0.8 : 0));
+        if (this.damage.wrecked) {
+          this.effects.debris(this.flight.pos, 18);
+          this.sound.crash();
+          this.showCrashed('damage');
+        } else if (this.fuel.empty && event === 'landed-field') {
+          // Stranded away from the runway with a dry tank: the run is over.
+          this.showCrashed('fuel');
+        } else if (this._missionDoneOnLanding()) {
+          this._finishMission();
         } else {
           this.hud.message('LANDED — HOLD SHIFT AND PULL UP TO TAKE OFF AGAIN', 2.5);
         }
-      } else if (event === 'landed-field') {
-        this.sound.thud(0.8);
-        this.hud.message('FIELD LANDING — HOLD SHIFT AND PULL UP TO TAKE OFF AGAIN', 2.5);
       } else if (event === 'crashed') {
+        this.effects.debris(this.flight.pos, 18);
         this.sound.crash();
-        this.showCrashed();
+        this.showCrashed('impact');
       }
 
-      // Rings, in order.
-      const passed = this.rings.checkPass(this.flight.pos);
-      if (passed) {
-        this.score += 100;
-        this.sound.chime();
-        if (this.rings.done) {
-          this.hud.message('FINAL RING — LAND ON THE RUNWAY', 3);
-          this.hud.hint('ALL RINGS FLOWN — LAND ON THE RUNWAY');
-        } else {
-          this.hud.message(`RING ${passed.index + 1} / 8  ·  +100`, 1.6);
+      // Terrain scrape: the ground ahead is rising into the flight path.
+      if (this.flight.scraping) {
+        this.scrapeAcc += dt;
+        this.damage.add(6 * dt, 'scrape');
+        const belly = this._tmp.copy(this.flight.pos).add(new THREE.Vector3(0, -1, 0));
+        this.effects.sparks(belly, 2);
+        if (this.damage.wrecked) {
+          this.effects.debris(this.flight.pos, 18);
+          this.sound.crash();
+          this.showCrashed('damage');
         }
+      }
+
+      // Rings, in order — only the Ring Run flies them. A streak kept alive
+      // multiplies the points: the second ring in a row is worth 200, the
+      // third 300, and so on.
+      if (this.missions.current === 'ring') {
+        const passed = this.rings.checkPass(this.flight.pos);
+        if (passed) {
+          this.combo = this.elapsed - this.lastRingTime < COMBO_WINDOW ? this.combo + 1 : 1;
+          this.lastRingTime = this.elapsed;
+          const pts = 100 * this.combo;
+          this.score += pts;
+          this.sound.chime();
+          if (this.rings.done) {
+            this.missions.phase = 'done';
+            this.hud.message('FINAL RING — LAND ON THE RUNWAY', 3);
+            this.hud.hint('ALL RINGS FLOWN — LAND ON THE RUNWAY');
+          } else {
+            this.hud.message(
+              `RING ${passed.index + 1} / 8  ·  +${pts}${this.combo > 1 ? `  ·  COMBO ×${this.combo}` : ''}`,
+              1.6
+            );
+          }
+        }
+        if (this.combo > 1 && this.elapsed - this.lastRingTime > COMBO_WINDOW) this.combo = 1;
       }
     }
 
@@ -284,15 +468,28 @@ export class Game {
         this.hud.hint('HOLD SHIFT FOR THROTTLE · PULL UP (W) TO TAKE OFF');
       } else if (this.flight.grounded) {
         this.hud.hint('ON THE GROUND — HOLD SHIFT AND PULL UP TO TAKE OFF AGAIN');
-      } else if (this.rings.done) {
-        this.hud.hint('ALL RINGS FLOWN — LAND ON THE RUNWAY');
       } else {
-        this.hud.hint('FLY THROUGH THE GOLD RING');
+        this.hud.hint(this.missions.objectiveText());
+      }
+    }
+
+    // A damaged engine trails smoke; the worse it is, the thicker it gets.
+    const smokeLevel = this.damage.smokeLevel;
+    if (smokeLevel > 0 && !this.flight.grounded && this.state === 'flying') {
+      this.smokeAcc += dt;
+      const interval = smokeLevel === 1 ? 0.14 : 0.07;
+      if (this.smokeAcc >= interval) {
+        this.smokeAcc = 0;
+        const p = this._tmp.copy(this.flight.pos).add(new THREE.Vector3(0, 0.4, 2.5));
+        this.effects.smoke(p);
       }
     }
 
     this.rings.update(dt, this.elapsed);
+    this.fuel.update(dt, this.elapsed);
     this.world.update(dt);
+    this.landmarks.update(dt, this.elapsed);
+    this.effects.update(dt);
     this.sound.update(this.flight.throttle, this.flight.speed, !this.flight.grounded);
     this._syncPlaneVisual(dt);
     this.positionCamera(false);
@@ -300,17 +497,80 @@ export class Game {
     input.endFrame();
   }
 
+  // True when the plane has just landed and the current mission is finished.
+  _missionDoneOnLanding() {
+    if (this.missions.current === 'ring') return this.rings.done;
+    if (this.missions.current === 'cargo') return this.missions.phase === 'return';
+    if (this.missions.current === 'rescue') return this.missions.phase === 'aboard';
+    return false;
+  }
+
+  // Score the finished mission and show the complete screen.
+  _finishMission() {
+    const def = this.missions.def;
+    const par = def.par;
+    this.timeBonus = Math.max(0, Math.round((par - this.elapsed) * 2));
+    this.sound.fanfare();
+    if (this.missions.current === 'ring') {
+      this.showComplete({
+        title: 'COURSE COMPLETE ✈',
+        sub: 'The mail is delivered and the Courier is home on the runway. Well flown, pilot.',
+        time: this.elapsed,
+        detailLine: '8 / 8 rings',
+        score: this.score,
+        bonus: this.timeBonus,
+      });
+    } else if (this.missions.current === 'cargo') {
+      this.showComplete({
+        title: 'CARGO DELIVERED ✈',
+        sub: 'The crate is on the ground and the Courier is home. A clean drop, pilot.',
+        time: this.elapsed,
+        detailLine: `DROP: ${Math.round(this.cargo.landedDist)} m from centre · +${this.cargo.accuracyScore}`,
+        score: this.score,
+        bonus: this.timeBonus,
+      });
+    } else {
+      this.showComplete({
+        title: 'RESCUE COMPLETE ✈',
+        sub: 'The hiker is safe on the runway and the Courier brought them home. Well flown, pilot.',
+        time: this.elapsed,
+        detailLine: 'HIKER SAFE · RIDGE PICKUP',
+        score: this.score,
+        bonus: this.timeBonus,
+      });
+    }
+  }
+
   _syncPlaneVisual(dt) {
     const f = this.flight;
     this.plane.group.position.copy(f.pos);
+    // A firm touchdown bounces the airframe a little, visually.
+    if (this.landBounceT > 0) {
+      this.landBounceT = Math.max(0, this.landBounceT - dt);
+      this.plane.group.position.y += Math.sin((this.landBounceT / 0.5) * Math.PI) * 0.9;
+    }
     this.plane.group.rotation.set(f.pitch, f.yaw, -f.roll, 'YXZ');
-    const spin = f.grounded && f.throttle < 0.05 ? 0 : 10 + f.throttle * 60;
+    const spin = (f.grounded && f.throttle < 0.05) || f.engineOut ? 0 : 10 + f.throttle * 60;
     this.plane.animate(dt, spin, f.roll, f.pitch);
   }
 
   _updateHud() {
     const f = this.flight;
-    const next = this.rings.next;
+    const next = this.missions.current === 'ring' ? this.rings.next : null;
+    // The HUD arrow points at whatever the pilot is chasing: the next ring,
+    // the drop zone, or the rescue beacon.
+    let target = null;
+    let targetDist = 0;
+    if (next) {
+      target = next.pos;
+      targetDist = this.rings.nextDistance(f.pos);
+    } else if (this.missions.current === 'cargo' && this.missions.phase === 'go') {
+      target = new THREE.Vector3(140, 0, -180);
+      targetDist = Math.hypot(f.pos.x - 140, f.pos.z + 180);
+    } else if (this.missions.current === 'rescue' && this.missions.phase === 'go') {
+      target = new THREE.Vector3(HELIPAD.x, 0, HELIPAD.z);
+      targetDist = Math.hypot(f.pos.x - HELIPAD.x, f.pos.z - HELIPAD.z);
+    }
     this.hud.update({
       altFt: f.altitudeFt(),
       speedKts: f.speedKts(),
@@ -319,18 +579,47 @@ export class Game {
       score: this.score,
       ringsFlown: this.rings.items.length - this.rings.remaining,
       ringsTotal: this.rings.items.length,
+      ringsText: this._ringsText(),
       timeSec: this.elapsed,
       pitch: f.pitch,
       roll: f.roll,
-      ringPos: next ? next.pos : null,
-      ringDist: next ? this.rings.nextDistance(f.pos) : 0,
+      ringPos: target,
+      ringDist: targetDist,
       flying: !f.grounded,
       grounded: f.grounded,
+      fuel: this.fuel.level,
+      damage: this.damage.level,
+      windToDeg: this.weather.toDeg,
+      windKts: this.weather.speedKts,
+      combo: this.combo,
+      missionName: this.missions.name,
+      objective: this.missions.objectiveText(),
+      showDrop: this.missions.current === 'cargo' && this.missions.phase === 'go',
     });
+  }
+
+  // The small RINGS readout on the HUD is mission-aware: a ring count for
+  // the Ring Run, the drop state for Cargo, the pickup state for Rescue.
+  _ringsText() {
+    if (this.missions.current === 'ring') {
+      return `${this.rings.items.length - this.rings.remaining}/${this.rings.items.length}`;
+    }
+    if (this.missions.current === 'cargo') {
+      if (this.missions.phase === 'return') return `DROP +${this.cargo.accuracyScore}`;
+      if (this.missions.phase === 'dropped') return 'CRATE FALLING';
+      return 'CARRYING CRATE';
+    }
+    if (this.missions.current === 'rescue') {
+      return this.missions.phase === 'aboard' ? 'HIKER ABOARD' : 'FIND BEACON';
+    }
+    return '';
   }
 }
 
 // Boot when the page loads.
 const game = new Game();
 window.__game = game;
+// Test hook: the ground height at (x, z), so the tests can place the plane
+// precisely (for example just above the rescue helipad).
+window.__terrainHeight = terrainHeight;
 game.run();

@@ -31,6 +31,11 @@ export class Flight {
     this.verticalSpeed = 0; // m/s, positive climbing (for the HUD + landings)
     this.euler = new THREE.Euler(0, 0, 0, 'YXZ');
     this.forward = new THREE.Vector3(0, 0, -1);
+    this.wind = new THREE.Vector3(); // m/s, set by the game from the weather
+    this.turbulence = 0; // 0 smooth to 1 a strong gust: wobbles the plane
+    this.engineOut = false; // true when the tank is dry: the prop stops
+    this.scraping = false; // true while the plane clips rising ground
+    this.lastImpact = null; // { descent, speed, slope, onRunway, severity }
   }
 
   // Recompute the Euler and the forward vector from the current angles.
@@ -52,6 +57,9 @@ export class Flight {
     this.grounded = true;
     this.crashed = false;
     this.verticalSpeed = 0;
+    this.engineOut = false;
+    this.scraping = false;
+    this.lastImpact = null;
     this.sync();
   }
 
@@ -80,13 +88,21 @@ export class Flight {
 
   // One step. input: { pitch: -1..1 (up positive), roll: -1..1 (right
   // positive), throttle: -1..1 } plus dt seconds. Returns an event string:
-  // 'takeoff' | 'landed' | 'crashed' | null.
+  // 'takeoff' | 'landed' | 'crashed' | null. The wind pushes the plane
+  // sideways; a dry tank forces the throttle closed and the plane glides.
   update(dt, input) {
     if (this.crashed) return null;
     dt = Math.min(dt, 0.1);
+    this.scraping = false;
 
     // --- throttle ------------------------------------------------------
-    this.throttle = clamp(this.throttle + input.throttle * 0.45 * dt, 0, 1);
+    // Engine out means the prop is stopped: the throttle bleeds to zero
+    // and the plane glides on whatever speed it has.
+    if (this.engineOut) {
+      this.throttle = Math.max(0, this.throttle - 0.6 * dt);
+    } else {
+      this.throttle = clamp(this.throttle + input.throttle * 0.45 * dt, 0, 1);
+    }
 
     // --- speed -----------------------------------------------------------
     // Climbing costs speed, descending gives it back: throttle discipline.
@@ -106,6 +122,8 @@ export class Flight {
       step.y = 0;
       step.normalize().multiplyScalar(this.speed * dt);
       this.pos.add(step);
+      // A breath of wind even on the ground, so the windsock is honest.
+      this.pos.addScaledVector(this.wind, dt * 0.15);
       this.pos.y = terrainHeight(this.pos.x, this.pos.z) + WHEEL_HEIGHT;
       this.verticalSpeed = 0;
       // Lift off once fast enough: pull up, or it lifts by itself at speed.
@@ -132,6 +150,11 @@ export class Flight {
     } else {
       this.roll += clamp(0 - this.roll, -1.0 * dt, 1.0 * dt);
     }
+    // A gust wobbles the wings a little, so the air has texture.
+    if (this.turbulence > 0.05) {
+      this.roll += (Math.random() - 0.5) * this.turbulence * 0.5 * dt;
+      this.pitch += (Math.random() - 0.5) * this.turbulence * 0.2 * dt;
+    }
     // A banked turn: the heading follows the bank.
     this.yaw -= this.roll * (0.3 + this.speed * 0.005) * dt;
 
@@ -145,6 +168,20 @@ export class Flight {
     this.verticalSpeed = this.forward.y * this.speed - sink;
     this.pos.addScaledVector(this.forward, this.speed * dt);
     this.pos.y -= sink * dt;
+    // The wind carries the plane sideways, in the air and on the ground.
+    this.pos.addScaledVector(this.wind, dt);
+
+    // A terrain scrape: the ground ahead is rising into the flight path.
+    // It is not a crash, but it wears the airframe and throws sparks.
+    const ahead = new THREE.Vector3()
+      .copy(this.pos)
+      .addScaledVector(this.forward, 12);
+    const aheadGround = terrainHeight(ahead.x, ahead.z);
+    if (aheadGround > this.pos.y + 0.5 && this.speed > 25) {
+      this.scraping = true;
+      this.pos.y = aheadGround + 1.2;
+      this.speed = Math.max(20, this.speed - 12 * dt);
+    }
 
     // --- the ground ------------------------------------------------------
     const ground = terrainHeight(this.pos.x, this.pos.z) + WHEEL_HEIGHT;
@@ -152,7 +189,16 @@ export class Flight {
       const descent = -this.verticalSpeed; // positive when coming down
       const slope = this.groundSlope();
       const onRunway = isOnRunway(this.pos.x, this.pos.z);
-      if (descent > 8 || this.speed > 58 || slope > 0.4) {
+      // How hard the arrival was, 0 a kiss to 1 a wrecking hit.
+      const severity = Math.max(
+        clamp((descent - 3) / 8, 0, 1),
+        clamp((this.speed - 45) / 25, 0, 1),
+        clamp((slope - 0.2) / 0.4, 0, 1)
+      );
+      this.lastImpact = { descent, speed: this.speed, slope, onRunway, severity };
+      // Only a truly wrecking arrival ends the flight outright; a firm one
+      // lands and wears the airframe instead.
+      if (descent > 14 || this.speed > 78 || slope > 0.75) {
         this.crashed = true;
         this.pos.y = ground;
         return 'crashed';

@@ -4,13 +4,15 @@
 // except the buttons the page wires up itself.
 
 // Keys we listen for. Arrow keys and WASD fly the plane; Shift/Ctrl and +/-
-// work the throttle; Enter starts, restarts and confirms.
+// work the throttle; Enter starts, restarts and confirms. C drops the cargo;
+// 1, 2 and 3 pick a mission on the menu.
 const KEYS = new Set([
   'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
   'KeyW', 'KeyA', 'KeyS', 'KeyD',
   'ShiftLeft', 'ShiftRight', 'ControlLeft', 'ControlRight',
   'Equal', 'Minus', 'NumpadAdd', 'NumpadSubtract',
-  'Enter', 'Space', 'KeyR', 'KeyM', 'KeyP',
+  'Enter', 'Space', 'KeyR', 'KeyM', 'KeyP', 'KeyC',
+  'Digit1', 'Digit2', 'Digit3',
 ]);
 
 export class Input {

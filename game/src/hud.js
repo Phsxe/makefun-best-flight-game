@@ -14,6 +14,8 @@ export class Hud {
     for (const id of [
       'alt', 'spd', 'hdg', 'compass', 'thr', 'thrbar', 'score', 'rings',
       'time', 'crosshair', 'ringind', 'ringdist', 'message', 'hint', 'horizon',
+      'fuel', 'fuelbar', 'dmg', 'dmgbar', 'wind', 'windarrow', 'combo',
+      'mission', 'objective',
     ]) {
       this.el[id] = document.getElementById(id);
     }
@@ -24,7 +26,8 @@ export class Hud {
 
   // values: { altFt, speedKts, headingDeg, throttle, score, ringsLeft,
   // ringsTotal, timeSec, pitch, roll, ringPos (Vector3|null), ringDist,
-  // flying, grounded }
+  // flying, grounded, fuel, damage, windToDeg, windKts, combo, missionName,
+  // objective }
   update(v) {
     const el = this.el;
     if (el.alt) el.alt.textContent = `${Math.round(v.altFt)}`;
@@ -34,8 +37,40 @@ export class Hud {
     if (el.thr) el.thr.textContent = `${Math.round(v.throttle * 100)}%`;
     if (el.thrbar) el.thrbar.style.width = `${Math.round(v.throttle * 100)}%`;
     if (el.score) el.score.textContent = `${v.score}`;
-    if (el.rings) el.rings.textContent = `${v.ringsFlown}/${v.ringsTotal}`;
+    if (el.rings) el.rings.textContent = v.ringsText || `${v.ringsFlown}/${v.ringsTotal}`;
     if (el.time) el.time.textContent = this._fmtTime(v.timeSec);
+    // Fuel: the bar drains with the tank and turns red when it is low.
+    if (el.fuel) el.fuel.textContent = `${Math.round(v.fuel)}%`;
+    if (el.fuelbar) {
+      el.fuelbar.style.width = `${Math.round(v.fuel)}%`;
+      el.fuelbar.style.background =
+        v.fuel < 22 ? 'linear-gradient(90deg, #ff4a2a, #ff7a3c)'
+        : v.fuel < 50 ? 'linear-gradient(90deg, #ff9a3c, #ffd27a)'
+        : 'linear-gradient(90deg, #37c978, #7ae8a8)';
+    }
+    // Damage: the bar fills as the airframe wears, green to red.
+    if (el.dmg) el.dmg.textContent = `${Math.round(v.damage)}%`;
+    if (el.dmgbar) {
+      el.dmgbar.style.width = `${Math.round(v.damage)}%`;
+      el.dmgbar.style.background =
+        v.damage > 70 ? 'linear-gradient(90deg, #ff4a2a, #ff7a3c)'
+        : v.damage > 40 ? 'linear-gradient(90deg, #ff9a3c, #ffd27a)'
+        : 'linear-gradient(90deg, #37c978, #7ae8a8)';
+    }
+    // Wind: an arrow pointing where the wind blows toward, with the speed.
+    // The arrow glyph points east at 0°, so rotate by heading minus 90°.
+    if (el.wind) el.wind.textContent = `${Math.round(v.windKts)} KT`;
+    if (el.windarrow) el.windarrow.style.transform = `rotate(${v.windToDeg - 90}deg)`;
+    // Combo: only shown while the streak is alive.
+    if (el.combo) {
+      el.combo.style.display = v.combo > 1 ? 'block' : 'none';
+      el.combo.textContent = `COMBO ×${v.combo}`;
+    }
+    if (el.mission) el.mission.textContent = v.missionName || '';
+    if (el.objective) el.objective.textContent = v.objective || '';
+    // The DROP button only shows while the cargo mission is carrying.
+    const dropBtn = document.getElementById('btn-drop');
+    if (dropBtn) dropBtn.style.display = v.showDrop ? 'block' : 'none';
     if (this.horizonCtx) this._drawHorizon(v.pitch, v.roll);
     if (el.ringind) this._placeRingIndicator(v.ringPos, v.ringDist);
     if (this._msgTimer > 0) {

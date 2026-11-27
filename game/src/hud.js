@@ -24,6 +24,21 @@ export class Hud {
     this._v = new THREE.Vector3();
   }
 
+  // The cockpit view has its own instruments along the bottom, so the
+  // chase panels (the side readouts, the horizon, the crosshair) step
+  // aside while it is on. The mission bar, messages and the ring arrow
+  // stay, so the pilot never loses the objective.
+  setCockpit(on) {
+    const hide = (id, hideIt) => {
+      const el = document.getElementById(id);
+      if (el) el.style.display = hideIt ? 'none' : '';
+    };
+    hide('hud-left', on);
+    hide('hud-right', on);
+    hide('horizon-wrap', on);
+    hide('crosshair', on);
+  }
+
   // values: { altFt, speedKts, headingDeg, throttle, score, ringsLeft,
   // ringsTotal, timeSec, pitch, roll, ringPos (Vector3|null), ringDist,
   // flying, grounded, fuel, damage, windToDeg, windKts, combo, missionName,

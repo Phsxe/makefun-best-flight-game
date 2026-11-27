@@ -21,6 +21,9 @@ import { Landmarks } from './landmarks.js';
 import { Weather } from './weather.js';
 import { Cargo } from './cargo.js';
 import { Effects } from './effects.js';
+import { Cockpit } from './cockpit.js';
+import { Campaign, TOUR_LEGS } from './campaign.js';
+import { landingScore, landingLine } from './landing.js';
 import { readShotParams, applyShot } from './shots.js';
 
 const COMBO_WINDOW = 20; // seconds between rings to keep the streak alive
@@ -43,6 +46,10 @@ export class Game {
     this.landBounceT = 0;
     this.smokeAcc = 0;
     this.scrapeAcc = 0;
+    this.campaign = new Campaign();
+    this.lastLanding = null; // the last precision-landing score, for the end screen
+    this.turnTimer = 0; // seconds spent on the runway between tour legs
+    this._propSpin = 0;
     this._camPos = new THREE.Vector3(0, 8, 395);
     this._camTarget = new THREE.Vector3(0, 2, 360);
     this._tmp = new THREE.Vector3();
@@ -73,6 +80,7 @@ export class Game {
     this.weather = new Weather();
     this.effects = new Effects(this.scene);
     this.hud = new Hud(this.camera);
+    this.cockpit = new Cockpit(this.scene, this.camera);
     this.sound = new Sound();
     this.input = new Input();
     this.input.attach();
@@ -92,22 +100,43 @@ export class Game {
       const b = $(`btn-mission-${id}`);
       if (b) b.addEventListener('click', () => { this.sound.ensure(); this.selectMission(id); start(id); });
     }
+    const tourBtn = $('btn-mission-tour');
+    if (tourBtn) tourBtn.addEventListener('click', () => { this.sound.ensure(); this.selectMission('tour'); start('tour'); });
     if ($('btn-again')) $('btn-again').addEventListener('click', () => { this.sound.ensure(); again(); });
     if ($('btn-crash')) $('btn-crash').addEventListener('click', () => { this.sound.ensure(); again(); });
+    if ($('btn-turn')) $('btn-turn').addEventListener('click', () => { this.sound.ensure(); this._nextTourLeg(); });
     if ($('btn-mute')) $('btn-mute').addEventListener('click', () => this.toggleMute());
+    if ($('btn-cockpit')) $('btn-cockpit').addEventListener('click', () => { this.sound.ensure(); this.toggleCockpit(); });
     if ($('btn-drop')) $('btn-drop').addEventListener('click', () => { this.dropQueued = true; });
   }
 
   selectMission(id) {
     this.selectedMission = id;
-    for (const m of MISSION_ORDER) {
+    for (const m of [...MISSION_ORDER, 'tour']) {
       const b = document.getElementById(`btn-mission-${m}`);
       if (b) b.classList.toggle('selected', m === id);
     }
   }
 
+  // The cockpit view: first person from the pilot's seat, live instruments
+  // along the bottom, the plane itself hidden so the fuselage never blocks
+  // the windscreen. The chase camera is the other view.
+  toggleCockpit() {
+    const on = this.cockpit.toggle();
+    this.hud.setCockpit(on);
+    this.plane.group.visible = !on;
+    const b = document.getElementById('btn-cockpit');
+    if (b) b.textContent = on ? 'CHASE VIEW (V)' : 'COCKPIT (V)';
+    this.positionCamera(true);
+    return on;
+  }
+
+  setCockpitView(on) {
+    if (this.cockpit.enabled !== on) this.toggleCockpit();
+  }
+
   showOverlay(id) {
-    for (const o of ['overlay-menu', 'overlay-complete', 'overlay-crash']) {
+    for (const o of ['overlay-menu', 'overlay-complete', 'overlay-crash', 'overlay-turnaround']) {
       const el = document.getElementById(o);
       if (el) el.classList.toggle('hidden', o !== id);
     }
@@ -126,14 +155,24 @@ export class Game {
 
   // --- run control ---------------------------------------------------------
 
-  startRun(missionId = this.selectedMission) {
+  // Start a run. opts.keepFuelDamage keeps the tank and the airframe as
+  // they are — a tour leg carries both over from the leg before it.
+  startRun(missionId = this.selectedMission, opts = {}) {
+    // The tour is a mode, not a mission: it runs its legs in order.
+    if (missionId === 'tour') {
+      this.startCampaign(0);
+      return;
+    }
     this.sound.ensure();
+    this.campaign.end();
     this.missions.select(missionId);
     this.selectedMission = missionId;
     this.flight.reset();
     this.rings.reset();
-    this.fuel.reset();
-    this.damage.reset();
+    if (!opts.keepFuelDamage) {
+      this.fuel.reset();
+      this.damage.reset();
+    }
     this.cargo.reset();
     this.weather.reset();
     this.effects.clear();
@@ -146,6 +185,7 @@ export class Game {
     this.fuelWarnAt = -999;
     this.dropQueued = false;
     this.landBounceT = 0;
+    this.lastLanding = null;
     this.flight.throttle = 0.55;
     this.state = 'flying';
     this.hideOverlays();
@@ -161,12 +201,112 @@ export class Game {
     this.positionCamera(true);
   }
 
+  // Start the tour (Fly the Tour), optionally at a later leg — the
+  // screenshots jump straight to a leg to frame it.
+  startCampaign(legIndex = 0) {
+    this.sound.ensure();
+    this.campaign.start(legIndex);
+    this.selectedMission = 'tour';
+    // A fresh tour starts with a full tank and a clean airframe; a later
+    // leg keeps whatever the tour has left.
+    const keep = legIndex > 0;
+    if (!keep) {
+      this.fuel.reset();
+      this.damage.reset();
+    }
+    this._startTourLeg();
+  }
+
+  // One leg of the tour: the leg's mission, with the tour's fuel and
+  // damage carried over.
+  _startTourLeg() {
+    const missionId = this.campaign.legMission;
+    this.missions.select(missionId);
+    this.flight.reset();
+    this.rings.reset();
+    this.cargo.reset();
+    this.weather.reset();
+    this.effects.clear();
+    this.score = 0;
+    this.elapsed = 0;
+    this.timeBonus = 0;
+    this.hasTakenOff = false;
+    this.combo = 1;
+    this.lastRingTime = -999;
+    this.fuelWarnAt = -999;
+    this.dropQueued = false;
+    this.landBounceT = 0;
+    this.lastLanding = null;
+    this.flight.throttle = 0.55;
+    this.state = 'flying';
+    this.hideOverlays();
+    const ringsVisible = missionId === 'ring';
+    for (const it of this.rings.items) it.group.visible = ringsVisible;
+    if (missionId === 'cargo') this.cargo.arm();
+    this.landmarks.setRescueBeaconVisible(missionId === 'rescue');
+    this.hud.message(`FLY THE TOUR — ${this.campaign.legLabel} · ${this.missions.name}`, 2.5);
+    this.hud.hint(this.missions.objectiveText());
+    this.positionCamera(true);
+  }
+
+  // The tour's next leg, from the turnaround on the runway.
+  _nextTourLeg() {
+    this.campaign.advance();
+    if (this.campaign.finished) {
+      this._finishCampaign();
+      return;
+    }
+    this._startTourLeg();
+  }
+
+  // Between tour legs the Courier sits on the runway: the tank refills and
+  // the ground crew mends the airframe while the pilot waits. The leg
+  // advances on Enter, on the button, or after a few seconds on its own.
+  _enterTurnaround(legScore, legBonus, legTime) {
+    this.campaign.recordLeg(legScore, legBonus, legTime);
+    this.state = 'turnaround';
+    this.turnTimer = 0;
+    const set = (id, text) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = text;
+    };
+    const nextMission = this.campaign.legIndex + 1 < TOUR_LEGS.length
+      ? TOUR_LEGS[this.campaign.legIndex + 1] : null;
+    const nextName = nextMission === 'cargo' ? 'CARGO DROP' : nextMission === 'rescue' ? 'MOUNTAIN RESCUE' : 'RING RUN';
+    set('turn-title', `${this.campaign.legLabel} COMPLETE ✈`);
+    set('turn-sub', 'The Courier is on the runway — the tank is refilling and the ground crew is mending the airframe.');
+    set('turn-score', `${this.campaign.legLabel} · ${this.missions.name} — ${legScore} points + ${legBonus} time bonus`);
+    set('turn-next', nextMission ? `NEXT LEG: ${nextName}` : 'TOUR COMPLETE');
+    this.showOverlay('overlay-turnaround');
+  }
+
+  // The whole tour is home: the final screen breaks it down leg by leg,
+  // with the tour bonus for bringing all three home.
+  _finishCampaign() {
+    const total = this.campaign.grandTotal;
+    this.sound.fanfare();
+    this.showComplete({
+      title: 'TOUR COMPLETE ✈',
+      sub: 'Three legs, one dawn, one Courier home. The valley is flown.',
+      time: this.campaign.totalTime,
+      detailLine: this.campaign.breakdownLine(),
+      score: this.campaign.totalScore,
+      bonus: this.campaign.totalBonus + 500,
+      landingLine: landingLine(this.lastLanding),
+    });
+    this.campaign.end();
+  }
+
   restart() {
-    this.startRun(this.missions.current);
+    if (this.selectedMission === 'tour') {
+      this.startCampaign(0);
+    } else {
+      this.startRun(this.missions.current);
+    }
   }
 
   showComplete(detail) {
-    // detail: { title, sub, timeLine, detailLine, score, bonus }
+    // detail: { title, sub, time, detailLine, score, bonus, landingLine }
     this.state = 'complete';
     const set = (id, text) => {
       const el = document.getElementById(id);
@@ -178,11 +318,14 @@ export class Game {
     set('final-rings', detail.detailLine);
     set('final-score', `${detail.score}`);
     set('final-bonus', `+${detail.bonus} time bonus`);
+    set('final-landing', detail.landingLine || landingLine(this.lastLanding));
     set('final-total', `${detail.score + detail.bonus}`);
     this.showOverlay('overlay-complete');
   }
 
   showCrashed(reason = 'impact') {
+    // A crash ends the tour as well as the run.
+    this.campaign.end();
     this.state = 'crashed';
     const set = (id, text) => {
       const el = document.getElementById(id);
@@ -212,8 +355,21 @@ export class Game {
   // Chase camera: behind and above the plane, level with the horizon (it
   // follows yaw and pitch but never rolls, so it never fights the pilot).
   // snap puts it exactly there at once (used by the screenshots).
+  // Cockpit camera: from the pilot's seat, rolling with the plane, the
+  // mouse drag looking around a little.
   positionCamera(snap = false) {
     const f = this.flight;
+    if (this.cockpit.enabled) {
+      const seat = this.cockpit.seatPosition(f, this._tmp);
+      this.camera.position.copy(seat);
+      this.camera.rotation.set(
+        f.pitch + this.lookPitch * 0.35,
+        f.yaw + this.lookYaw * 0.6,
+        -f.roll,
+        'YXZ'
+      );
+      return;
+    }
     const back = this._tmp.copy(f.forward).multiplyScalar(-1);
     back.y = 0;
     back.normalize();
@@ -282,16 +438,37 @@ export class Game {
       this.lookPitch *= 1 - Math.min(1, dt * 2.5);
     }
     if (input.wasPressed('KeyM')) this.toggleMute();
+    if (input.wasPressed('KeyV')) this.toggleCockpit();
 
     if (this.state === 'menu') {
-      // Pick a mission with 1/2/3, start the selected one with Enter.
+      // Pick a mission with 1/2/3/4, start the selected one with Enter.
       if (input.wasPressed('Digit1')) this.selectMission('ring');
       if (input.wasPressed('Digit2')) this.selectMission('cargo');
       if (input.wasPressed('Digit3')) this.selectMission('rescue');
+      if (input.wasPressed('Digit4')) this.selectMission('tour');
       if (input.wasPressed('Enter') || input.wasPressed('Space')) this.startRun(this.selectedMission);
       this.world.update(dt);
       this.landmarks.update(dt, this.elapsed);
       this.positionCamera(false);
+      this._syncPlaneVisual(dt);
+      this._updateHud();
+      input.endFrame();
+      return;
+    }
+
+    // Between tour legs: the Courier sits on the runway, the tank refills
+    // and the ground crew mends the airframe. Enter, the button, or a few
+    // seconds on its own moves on to the next leg.
+    if (this.state === 'turnaround') {
+      this.turnTimer += dt;
+      this.fuel.refuelOnRunway(dt);
+      this.damage.level = Math.max(0, this.damage.level - 8 * dt);
+      if (input.wasPressed('Enter') || input.wasPressed('Space') || this.turnTimer > 4) {
+        this._nextTourLeg();
+      }
+      this.world.update(dt);
+      this.landmarks.update(dt, this.elapsed);
+      this.effects.update(dt);
       this._syncPlaneVisual(dt);
       this._updateHud();
       input.endFrame();
@@ -403,6 +580,16 @@ export class Game {
           this.damage.add(dmg, 'landing');
           this.landBounceT = Math.min(0.5, impact.severity * 0.5);
         }
+        // Precision landing: a centred, gentle touchdown on the strip
+        // pays, and the grade shows on the end screen.
+        if (event === 'landed-runway') {
+          const land = landingScore(impact, this.flight.pos.x);
+          this.lastLanding = land;
+          if (land.points > 0) {
+            this.score += land.points;
+            this.hud.message(`TOUCHDOWN ${land.grade} · +${land.points}`, 2.5);
+          }
+        }
         this.effects.dust(this.flight.pos, impact ? 8 + Math.round(impact.severity * 10) : 8);
         this.sound.thud(0.6 + (impact ? impact.severity * 0.8 : 0));
         if (this.damage.wrecked) {
@@ -505,12 +692,18 @@ export class Game {
     return false;
   }
 
-  // Score the finished mission and show the complete screen.
+  // Score the finished mission and show the complete screen. On a tour
+  // leg, the leg is recorded and the run turns around on the runway for
+  // the next leg instead of ending.
   _finishMission() {
     const def = this.missions.def;
     const par = def.par;
     this.timeBonus = Math.max(0, Math.round((par - this.elapsed) * 2));
     this.sound.fanfare();
+    if (this.campaign.active) {
+      this._enterTurnaround(this.score, this.timeBonus, this.elapsed);
+      return;
+    }
     if (this.missions.current === 'ring') {
       this.showComplete({
         title: 'COURSE COMPLETE ✈',
@@ -519,6 +712,7 @@ export class Game {
         detailLine: '8 / 8 rings',
         score: this.score,
         bonus: this.timeBonus,
+        landingLine: landingLine(this.lastLanding),
       });
     } else if (this.missions.current === 'cargo') {
       this.showComplete({
@@ -528,6 +722,7 @@ export class Game {
         detailLine: `DROP: ${Math.round(this.cargo.landedDist)} m from centre · +${this.cargo.accuracyScore}`,
         score: this.score,
         bonus: this.timeBonus,
+        landingLine: landingLine(this.lastLanding),
       });
     } else {
       this.showComplete({
@@ -537,6 +732,7 @@ export class Game {
         detailLine: 'HIKER SAFE · RIDGE PICKUP',
         score: this.score,
         bonus: this.timeBonus,
+        landingLine: landingLine(this.lastLanding),
       });
     }
   }
@@ -551,6 +747,10 @@ export class Game {
     }
     this.plane.group.rotation.set(f.pitch, f.yaw, -f.roll, 'YXZ');
     const spin = (f.grounded && f.throttle < 0.05) || f.engineOut ? 0 : 10 + f.throttle * 60;
+    this._propSpin = spin;
+    // In the cockpit the plane itself is hidden — the fuselage would
+    // block the windscreen — and the cockpit cowl frames the view instead.
+    this.plane.group.visible = !this.cockpit.enabled;
     this.plane.animate(dt, spin, f.roll, f.pitch);
   }
 
@@ -592,9 +792,23 @@ export class Game {
       windToDeg: this.weather.toDeg,
       windKts: this.weather.speedKts,
       combo: this.combo,
-      missionName: this.missions.name,
+      missionName: this.campaign.active
+        ? `FLY THE TOUR — ${this.campaign.legLabel} · ${this.missions.name}`
+        : this.missions.name,
       objective: this.missions.objectiveText(),
       showDrop: this.missions.current === 'cargo' && this.missions.phase === 'go',
+    });
+    // The cockpit instruments read the same flight state, live.
+    this.cockpit.update(this._dt || 0, {
+      pitch: f.pitch,
+      roll: f.roll,
+      altFt: f.altitudeFt(),
+      speedKts: f.speedKts(),
+      headingDeg: f.headingDeg(),
+      fuel: this.fuel.level,
+      damage: this.damage.level,
+      throttle: f.throttle,
+      propSpin: this._propSpin,
     });
   }
 

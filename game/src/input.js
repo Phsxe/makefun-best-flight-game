@@ -5,14 +5,14 @@
 
 // Keys we listen for. Arrow keys and WASD fly the plane; Shift/Ctrl and +/-
 // work the throttle; Enter starts, restarts and confirms. C drops the cargo;
-// 1, 2 and 3 pick a mission on the menu.
+// 1, 2, 3 and 4 pick a mission on the menu; V toggles the cockpit view.
 const KEYS = new Set([
   'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
   'KeyW', 'KeyA', 'KeyS', 'KeyD',
   'ShiftLeft', 'ShiftRight', 'ControlLeft', 'ControlRight',
   'Equal', 'Minus', 'NumpadAdd', 'NumpadSubtract',
-  'Enter', 'Space', 'KeyR', 'KeyM', 'KeyP', 'KeyC',
-  'Digit1', 'Digit2', 'Digit3',
+  'Enter', 'Space', 'KeyR', 'KeyM', 'KeyP', 'KeyC', 'KeyV',
+  'Digit1', 'Digit2', 'Digit3', 'Digit4',
 ]);
 
 export class Input {
